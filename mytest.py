@@ -3,8 +3,10 @@ import math
 import numpy as np
 import torch.nn as nn
 from torch.nn import init
-from libs.modeling.FPNTransformer import FPNTrans
-from libs.modeling.blocks import LayerNorm
+
+
+# from libs.modeling.FPNTransformer import FPNTrans
+# from libs.modeling.blocks import LayerNorm
 
 
 class Swish(nn.Module):
@@ -88,11 +90,11 @@ class TimeEmbedding(nn.Module):
         return emb
 
 
+
+
 if __name__ == '__main__':
-    test_ = FPNTrans()
-    noisy_segments = torch.randn(2, 2, 4536)
-    noisy_labels = torch.randn(2, 20, 4536)
-    fpn_feats = torch.randn(2, 512, 4536)
-    fpn_masks = torch.randn(2, 1, 4536).bool()
-    ts = torch.Tensor([42, 23]).long()
-    noisy_segments, noisy_labels = test_(noisy_segments, noisy_labels, fpn_feats, fpn_masks, ts)
+    sampling_timesteps = 5  # number of sample steps
+    times = torch.linspace(-1, 99, steps=sampling_timesteps + 1)
+    times = list(reversed(times.int().tolist()))
+    time_pairs = list(zip(times[:-1], times[1:]))
+    print(time_pairs)
