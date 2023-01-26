@@ -169,7 +169,7 @@ def extract(a, t, x_shape):
     return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
 
 
-def change_to_pyramid(noisy_segments, noisy_labels):
+def change_to_pyramid(noisy_segments, noisy_labels, feature_sum):
     """
     将[2, ..., 4536]转为特征金字塔形式
     [2, ..., 2304], [2, ..., 1152] ...
@@ -361,10 +361,10 @@ class PtTransformer(nn.Module):
         timesteps = 500
         betas = 1 - cosine_beta_schedule(timesteps)
         alphas = 1. - betas
-        self.alphas_cumprod = torch.cumprod(alphas, dim=0)
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1. / self.alphas_cumprod - 1)
+        self.alphas_cumprod = torch.cumprod(alphas, dim=0).to("cuda")
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod).to("cuda")
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod).to("cuda")
+        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1. / self.alphas_cumprod - 1).to("cuda")
         self.FPNtrans = FPNTrans()
 
     @property
@@ -380,8 +380,13 @@ class PtTransformer(nn.Module):
         # forward the network (backbone -> neck -> heads)
         feats, masks = self.backbone(batched_inputs, batched_masks)
         fpn_feats, fpn_masks = self.neck(feats, masks)
-        # 此处固定 feat_lens = [2304, 1152, 576, 288, 144, 72]
-        points = self.point_generator()
+
+        feature_lens = [x.shape[-1] for x in fpn_feats]
+        feature_sum = [0]
+        for k in range(6):
+            feature_sum.append(feature_sum[-1] + feature_lens[k])
+
+        points = self.point_generator(feature_lens)
         masks = torch.cat(fpn_masks, dim=2)
         if self.training:
             # 首先计算gt值
@@ -410,7 +415,7 @@ class PtTransformer(nn.Module):
                 noisy_segments, noisy_labels, fpn_feats, masks, ts.to(self.device)
             )
             # 转换回金字塔形式
-            noisy_segments, noisy_labels = change_to_pyramid(noisy_segments, noisy_labels)
+            noisy_segments, noisy_labels = change_to_pyramid(noisy_segments, noisy_labels, feature_sum)
             # 回归和分类
             out_cls_logits = self.cls_head(noisy_labels, fpn_masks)
             out_offsets = self.reg_head(noisy_segments, fpn_masks)
@@ -425,9 +430,13 @@ class PtTransformer(nn.Module):
             )
             return losses
         else:
+            fpn_feats = torch.cat(fpn_feats, dim=2)
             # decode the actions (sigmoid / stride, etc)
-            out_offsets, out_cls_logits = self.diffusion_inference(feats, masks, fpn_masks)
-            out_offsets, out_cls_logits = change_to_pyramid(out_offsets, out_cls_logits)
+            out_offsets, out_cls_logits = self.diffusion_inference(fpn_feats, masks, fpn_masks, feature_sum)
+            out_offsets, out_cls_logits = change_to_pyramid(out_offsets, out_cls_logits, feature_sum)
+            out_cls_logits = [x.permute(0, 2, 1) for x in out_cls_logits]
+            out_offsets = [x.permute(0, 2, 1) for x in out_offsets]
+            fpn_masks = [x.squeeze(1) for x in fpn_masks]
             results = self.inference(
                 video_list, points, fpn_masks,
                 out_cls_logits, out_offsets
@@ -846,7 +855,7 @@ class PtTransformer(nn.Module):
     @torch.no_grad()
     def diffusion_inference(
             self,
-            feats, masks, fpn_masks
+            feats, masks, fpn_masks, feature_sum
     ):
         """
         feats: 由视频数据提取的金字塔特征并合并[2, 512, 4526]
@@ -854,8 +863,8 @@ class PtTransformer(nn.Module):
         fpn_masks: 金字塔形式的masks
         """
         # 初始随机噪声
-        noisy_segs = torch.randn(1, 4536, 2).to(self.device).float()
-        noisy_labels = torch.randn(1, 4536, 2).to(self.device).float()
+        noisy_segs = torch.randn(1, 2, 4536).to(self.device).float()
+        noisy_labels = torch.randn(1, 20, 4536).to(self.device).float()
         # number of sample steps
         sampling_timesteps = 5
         times = torch.linspace(-1, 99, steps=sampling_timesteps + 1)
@@ -864,9 +873,9 @@ class PtTransformer(nn.Module):
         for time_, timr_next in time_pairs:
             time_cond = torch.Tensor([time_]).to(self.device).long()
             out_offsets, out_cls_logits = self.FPNtrans(
-                noisy_segs, noisy_labels, feats, masks, time_cond
+                noisy_segs.float(), noisy_labels.float(), feats, masks, time_cond
             )
-            out_offsets, out_cls_logits = change_to_pyramid(out_offsets, out_cls_logits)
+            out_offsets, out_cls_logits = change_to_pyramid(out_offsets, out_cls_logits, feature_sum)
             out_cls_logits = self.cls_head(out_cls_logits, fpn_masks)
             out_offsets = self.reg_head(out_offsets, fpn_masks)
             out_offsets = torch.cat(out_offsets, dim=1)
@@ -881,16 +890,16 @@ class PtTransformer(nn.Module):
             sigma = ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
             c = (1 - alpha_next - sigma ** 2).sqrt()
 
-            noise1 = torch.randn_like(noisy_segs)
+            noise1 = torch.randn_like(noisy_segs).to(self.device)
             noisy_segs = out_offsets * alpha_next.sqrt() + \
                          c * pred_noise_segs + \
                          sigma * noise1
 
-            noise2 = torch.randn_like(noisy_labels)
+            noise2 = torch.randn_like(noisy_labels).to(self.device)
             noisy_labels = out_cls_logits * alpha_next.sqrt() + \
                            c * pred_noise_labels + \
                            sigma * noise2
-        return noisy_segs, noisy_labels
+        return noisy_segs.float(), noisy_labels.float()
 
     @torch.no_grad()
     def predict_noise_from_start(self, x_t, t, x0):

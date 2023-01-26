@@ -73,10 +73,10 @@ class PointGenerator(nn.Module):
 
         return BufferList(points_list)
 
-    def forward(self):
+    def forward(self, feature_lens):
         # feats will be a list of torch tensors
         pts_list = []
-        feat_lens = [2304, 1152, 576, 288, 144, 72]
+        feat_lens = feature_lens
         for feat_len, buffer_pts in zip(feat_lens, self.buffer_points):
             assert feat_len <= buffer_pts.shape[0], "Reached max buffer length for point generator"
             pts = buffer_pts[:feat_len, :]
