@@ -5,9 +5,6 @@ from torch.nn import init
 from .blocks import MaskedConv1D, get_sinusoid_encoding, LayerNorm, TransformerBlock
 
 
-
-
-
 class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
@@ -149,7 +146,3 @@ class FPNTrans(nn.Module):
             noisy_segments, fpn_masks = self.tail_seg[idx](noisy_segments + fpn_feats, fpn_masks)
             noisy_labels, fpn_masks = self.tail_lab[idx](noisy_labels + fpn_feats, fpn_masks)
         return noisy_segments, noisy_labels
-
-
-
-

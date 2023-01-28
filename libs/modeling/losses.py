@@ -35,7 +35,8 @@ def sigmoid_focal_loss(
     """
     inputs = inputs.float()
     targets = targets.float()
-    p = torch.sigmoid(inputs)
+    p = inputs
+    # p = torch.sigmoid(inputs)
     ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
     p_t = p * targets + (1 - p) * (1 - targets)
     loss = ce_loss * ((1 - p_t) ** gamma)

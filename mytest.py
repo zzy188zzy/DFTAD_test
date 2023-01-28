@@ -90,11 +90,25 @@ class TimeEmbedding(nn.Module):
         return emb
 
 
+def cosine_beta_schedule(timesteps, s=0.008):
+    steps = timesteps + 1
+    x = torch.linspace(0, timesteps, steps, dtype=torch.float64)
+    alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    return torch.clip(betas, 0, 0.999)
+
+
+def extract(a, t, x_shape):
+    """extract the appropriate  t  index for a batch of indices"""
+    batch_size = t.shape[0]
+    out = a.gather(-1, t)
+    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
 
 
 if __name__ == '__main__':
-    sampling_timesteps = 5  # number of sample steps
-    times = torch.linspace(-1, 99, steps=sampling_timesteps + 1)
+    sampling_timesteps = 5
+    times = torch.linspace(-1, 500, steps=sampling_timesteps + 1)
     times = list(reversed(times.int().tolist()))
     time_pairs = list(zip(times[:-1], times[1:]))
     print(time_pairs)

@@ -174,7 +174,7 @@ def change_to_pyramid(noisy_segments, noisy_labels, feature_sum):
     将[2, ..., 4536]转为特征金字塔形式
     [2, ..., 2304], [2, ..., 1152] ...
     """
-    clips = [0, 2304, 3456, 4032, 4320, 4464, 4536]
+    clips = feature_sum
     fpn_segments = []
     fpn_labels = []
     for clip_ in range(1, len(clips)):
@@ -365,6 +365,7 @@ class PtTransformer(nn.Module):
         self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod).to("cuda")
         self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod).to("cuda")
         self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1. / self.alphas_cumprod - 1).to("cuda")
+        self.sqrt_recip_alphas_cumprod = torch.sqrt(1. / self.alphas_cumprod).to("cuda")
         self.FPNtrans = FPNTrans()
 
     @property
@@ -403,7 +404,7 @@ class PtTransformer(nn.Module):
                 points, noisy_segments, noisy_labels)
             noisy_segments = torch.stack(noisy_segments)
             noisy_labels = torch.stack(noisy_labels)
-            noisy_segments, noisy_labels, ts = self.adding_noise(
+            noisy_segments, noisy_labels, ts, noise_s, noise_l = self.adding_noise(
                 noisy_segments, noisy_labels
             )
             # noisy_cls_labels: [2, 20, 4536], noisy_offsets: [2, 2, 4536]
@@ -426,7 +427,8 @@ class PtTransformer(nn.Module):
             losses = self.losses(
                 fpn_masks,
                 out_cls_logits, out_offsets,
-                gt_cls_labels, gt_offsets
+                gt_cls_labels, gt_offsets,
+                noise_s, noise_l
             )
             return losses
         else:
@@ -439,7 +441,7 @@ class PtTransformer(nn.Module):
             fpn_masks = [x.squeeze(1) for x in fpn_masks]
             results = self.inference(
                 video_list, points, fpn_masks,
-                out_cls_logits, out_offsets
+                out_cls_logits, out_offsets,
             )
             return results
 
@@ -591,39 +593,31 @@ class PtTransformer(nn.Module):
     def losses(
             self, fpn_masks,
             out_cls_logits, out_offsets,
-            gt_cls_labels, gt_offsets
+            gt_cls_labels, gt_offsets,
+            noise_s, noise_l
     ):
-        # fpn_masks, out_*: F (List) [B, T_i, C]
-        # gt_* : B (list) [F T, C]
-        # fpn_masks -> (B, FT)
         valid_mask = torch.cat(fpn_masks, dim=1)
 
-        # 1. classification loss
-        # stack the list -> (B, FT) -> (# Valid, )
         gt_cls = torch.stack(gt_cls_labels)
-        pos_mask = torch.logical_and((gt_cls.sum(-1) > 0), valid_mask)
+        pos_mask = valid_mask
 
-        # cat the predicted offsets -> (B, FT, 2 (xC)) -> # (#Pos, 2 (xC))
-        pred_offsets = torch.cat(out_offsets, dim=1)[pos_mask]
-        gt_offsets = torch.stack(gt_offsets)[pos_mask]
+        pred_offsets = torch.cat(out_offsets, dim=1)[pos_mask] - torch.stack(gt_offsets)[pos_mask]
 
-        # update the loss normalizer
         num_pos = pos_mask.sum().item()
         self.loss_normalizer = self.loss_normalizer_momentum * self.loss_normalizer + (
                 1 - self.loss_normalizer_momentum
         ) * max(num_pos, 1)
 
-        # gt_cls is already one hot encoded now, simply masking out
         gt_target = gt_cls[valid_mask]
-
-        # optinal label smoothing
         gt_target *= 1 - self.train_label_smoothing
         gt_target += self.train_label_smoothing / (self.num_classes + 1)
+        out_cls_logits = torch.cat(out_cls_logits, dim=1)[valid_mask]
+        pre_cla = torch.sigmoid(out_cls_logits) - gt_target
 
         # focal loss
         cls_loss = sigmoid_focal_loss(
-            torch.cat(out_cls_logits, dim=1)[valid_mask],
-            gt_target,
+            pre_cla,
+            noise_l,
             reduction='sum'
         )
         cls_loss /= self.loss_normalizer
@@ -635,7 +629,7 @@ class PtTransformer(nn.Module):
             # giou loss defined on positive samples
             reg_loss = ctr_diou_loss_1d(
                 pred_offsets,
-                gt_offsets,
+                noise_s,
                 reduction='sum'
             )
             reg_loss /= self.loss_normalizer
@@ -836,13 +830,13 @@ class PtTransformer(nn.Module):
 
     @torch.no_grad()
     def adding_noise(self, padding_segments, padding_labels):
-        ts = torch.randint(0, 100, (2,)).long()
+        ts = torch.randint(0, 500, (2,)).long().to(self.device)
         noise_s = torch.randn(padding_segments.shape, device=self.device)
         noise_l = torch.randn(padding_labels.shape, device=self.device)
         noisy_segments = self.q_sample(x_start=padding_segments, t=ts, noise=noise_s)
         noisy_labels = self.q_sample(x_start=padding_labels, t=ts, noise=noise_l)
 
-        return noisy_segments, noisy_labels, ts
+        return noisy_segments, noisy_labels, ts, noise_s, noise_l
 
     @torch.no_grad()
     def q_sample(self, x_start, t, noise=None):
@@ -863,14 +857,14 @@ class PtTransformer(nn.Module):
         fpn_masks: 金字塔形式的masks
         """
         # 初始随机噪声
-        noisy_segs = torch.randn(1, 2, 4536).to(self.device).float()
-        noisy_labels = torch.randn(1, 20, 4536).to(self.device).float()
+        noisy_segs = torch.randn(1, 2, feature_sum[-1]).to(self.device).float()
+        noisy_labels = torch.randn(1, 20, feature_sum[-1]).to(self.device).float()
         # number of sample steps
-        sampling_timesteps = 5
-        times = torch.linspace(-1, 99, steps=sampling_timesteps + 1)
+        sampling_timesteps = 10
+        times = torch.linspace(-1, 500, steps=sampling_timesteps + 1)
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:]))
-        for time_, timr_next in time_pairs:
+        for time_, time_next in time_pairs:
             time_cond = torch.Tensor([time_]).to(self.device).long()
             out_offsets, out_cls_logits = self.FPNtrans(
                 noisy_segs.float(), noisy_labels.float(), feats, masks, time_cond
@@ -878,27 +872,21 @@ class PtTransformer(nn.Module):
             out_offsets, out_cls_logits = change_to_pyramid(out_offsets, out_cls_logits, feature_sum)
             out_cls_logits = self.cls_head(out_cls_logits, fpn_masks)
             out_offsets = self.reg_head(out_offsets, fpn_masks)
-            out_offsets = torch.cat(out_offsets, dim=1)
-            out_cls_logits = torch.cat(out_cls_logits, dim=1)
-            # 处理offsets
-            pred_noise_segs = self.predict_noise_from_start(noisy_segs, time_cond, out_offsets)
-            # 处理class
-            pred_noise_labels = self.predict_noise_from_start(noisy_labels, time_cond, out_cls_logits)
+            out_cls_logits = torch.cat(out_cls_logits, dim=2)
+            out_offsets = torch.cat(out_offsets, dim=2)
 
             alpha = self.alphas_cumprod[time_]
-            alpha_next = self.alphas_cumprod[time_]
-            sigma = ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = (1 - alpha_next - sigma ** 2).sqrt()
+            alpha_next = self.alphas_cumprod[time_next]
+            c = (1 - alpha_next).sqrt()
 
+            x_0_offsets = (noisy_segs - (1 - alpha).sqrt()) / alpha.sqrt()
             noise1 = torch.randn_like(noisy_segs).to(self.device)
-            noisy_segs = out_offsets * alpha_next.sqrt() + \
-                         c * pred_noise_segs + \
-                         sigma * noise1
+            noisy_segs = x_0_offsets * alpha_next.sqrt() + \
+                         c * out_offsets
 
-            noise2 = torch.randn_like(noisy_labels).to(self.device)
-            noisy_labels = out_cls_logits * alpha_next.sqrt() + \
-                           c * pred_noise_labels + \
-                           sigma * noise2
+            x_0_cls = (noisy_labels - (1 - alpha).sqrt()) / alpha.sqrt()
+            noisy_labels = x_0_cls * alpha_next.sqrt() + \
+                           c * out_cls_logits
         return noisy_segs.float(), noisy_labels.float()
 
     @torch.no_grad()
