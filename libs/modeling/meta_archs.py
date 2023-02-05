@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from .models import register_meta_arch, make_backbone, make_neck, make_generator
 from .blocks import MaskedConv1D, Scale, LayerNorm
 from .losses import ctr_diou_loss_1d, sigmoid_focal_loss
-from .FPNTransformer import FPNTrans
+
 from ..utils import batched_nms
 
 
@@ -160,36 +160,6 @@ class PtTransformerRegHead(nn.Module):
 
         # fpn_masks remains the same
         return out_offsets
-
-
-def extract(a, t, x_shape):
-    """extract the appropriate  t  index for a batch of indices"""
-    batch_size = t.shape[0]
-    out = a.gather(-1, t)
-    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
-
-
-def change_to_pyramid(noisy_segments, noisy_labels, feature_sum):
-    """
-    将[2, ..., 4536]转为特征金字塔形式
-    [2, ..., 2304], [2, ..., 1152] ...
-    """
-    clips = feature_sum
-    fpn_segments = []
-    fpn_labels = []
-    for clip_ in range(1, len(clips)):
-        fpn_segments.append(noisy_segments[..., clips[clip_ - 1]: clips[clip_]])
-        fpn_labels.append(noisy_labels[..., clips[clip_ - 1]: clips[clip_]])
-    return fpn_segments, fpn_labels
-
-
-def cosine_beta_schedule(timesteps, s=0.008):
-    steps = timesteps + 1
-    x = torch.linspace(0, timesteps, steps, dtype=torch.float64)
-    alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
-    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(betas, 0, 0.999)
 
 
 @register_meta_arch("LocPointTransformer")
@@ -357,16 +327,7 @@ class PtTransformer(nn.Module):
         # useful for small mini-batch training
         self.loss_normalizer = train_cfg['init_loss_norm']
         self.loss_normalizer_momentum = 0.9
-
-        timesteps = 500
-        betas = 1 - cosine_beta_schedule(timesteps)
-        alphas = 1. - betas
-        self.alphas_cumprod = torch.cumprod(alphas, dim=0).to("cuda")
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod).to("cuda")
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod).to("cuda")
-        self.sqrt_recipm1_alphas_cumprod = torch.sqrt(1. / self.alphas_cumprod - 1).to("cuda")
-        self.sqrt_recip_alphas_cumprod = torch.sqrt(1. / self.alphas_cumprod).to("cuda")
-        self.FPNtrans = FPNTrans()
+        self.test_loss = nn.MSELoss()
 
     @property
     def device(self):
@@ -382,66 +343,52 @@ class PtTransformer(nn.Module):
         feats, masks = self.backbone(batched_inputs, batched_masks)
         fpn_feats, fpn_masks = self.neck(feats, masks)
 
+        # compute the point coordinate along the FPN
+        # this is used for computing the GT or decode the final results
+        # points: List[T x 4] with length = # fpn levels
+        # (shared across all samples in the mini-batch)
         feature_lens = [x.shape[-1] for x in fpn_feats]
-        feature_sum = [0]
-        for k in range(6):
-            feature_sum.append(feature_sum[-1] + feature_lens[k])
+        points = self.point_generator(fpn_feats)
 
-        points = self.point_generator(feature_lens)
-        masks = torch.cat(fpn_masks, dim=2)
+        # out_cls: List[B, #cls + 1, T_i]
+        out_cls_logits = self.cls_head(fpn_feats, fpn_masks)
+        # out_offset: List[B, 2, T_i]
+        out_offsets = self.reg_head(fpn_feats, fpn_masks)
+
+        # permute the outputs
+        # out_cls: F List[B, #cls, T_i] -> F List[B, T_i, #cls]
+        out_cls_logits = [x.permute(0, 2, 1) for x in out_cls_logits]
+        # out_offset: F List[B, 2 (xC), T_i] -> F List[B, T_i, 2 (xC)]
+        out_offsets = [x.permute(0, 2, 1) for x in out_offsets]
+        # fpn_masks: F list[B, 1, T_i] -> F List[B, T_i]
+        fpn_masks = [x.squeeze(1) for x in fpn_masks]
+
+        # return loss during training
         if self.training:
-            # 首先计算gt值
+            # generate segment/lable List[N x 2] / List[N] with length = B
+            assert video_list[0]['segments'] is not None, "GT action labels does not exist"
+            assert video_list[0]['labels'] is not None, "GT action labels does not exist"
             gt_segments = [x['segments'].to(self.device) for x in video_list]
             gt_labels = [x['labels'].to(self.device) for x in video_list]
-            gt_time_length = [x['feats'].shape[1] for x in video_list]
+
+            # compute the gt labels for cls & reg
+            # list of prediction targets
             gt_cls_labels, gt_offsets = self.label_points(
                 points, gt_segments, gt_labels)
-            # 计算padding后的box以及相对应的标签和偏移值
-            noisy_segments, noisy_labels = self.random_padding(
-                gt_segments, gt_labels, gt_time_length)
-            # noisy_cls_labels: [2, 4536, 20], noisy_segments: [2, 4536, 2]
-            noisy_labels, noisy_segments = self.label_points(
-                points, noisy_segments, noisy_labels)
-            noisy_segments = torch.stack(noisy_segments)
-            noisy_labels = torch.stack(noisy_labels)
-            noisy_segments, noisy_labels, ts, noise_s, noise_l = self.adding_noise(
-                noisy_segments, noisy_labels
-            )
-            # noisy_cls_labels: [2, 20, 4536], noisy_offsets: [2, 2, 4536]
-            noisy_segments = noisy_segments.permute(0, 2, 1).float()
-            noisy_labels = noisy_labels.permute(0, 2, 1).float()
-            # # 将金字塔的形式转化为 [2, 512, 4526]
-            fpn_feats = torch.cat(fpn_feats, dim=2)
-            noisy_segments, noisy_labels = self.FPNtrans(
-                noisy_segments, noisy_labels, fpn_feats, masks, ts.to(self.device)
-            )
-            # 转换回金字塔形式
-            noisy_segments, noisy_labels = change_to_pyramid(noisy_segments, noisy_labels, feature_sum)
-            # 回归和分类
-            out_cls_logits = self.cls_head(noisy_labels, fpn_masks)
-            out_offsets = self.reg_head(noisy_segments, fpn_masks)
 
-            out_cls_logits = [x.permute(0, 2, 1) for x in out_cls_logits]
-            out_offsets = [x.permute(0, 2, 1) for x in out_offsets]
-            fpn_masks = [x.squeeze(1) for x in fpn_masks]
+            # compute the loss and return
             losses = self.losses(
                 fpn_masks,
                 out_cls_logits, out_offsets,
-                gt_cls_labels, gt_offsets,
-                noise_s, noise_l
+                gt_cls_labels, gt_offsets
             )
             return losses
+
         else:
-            fpn_feats = torch.cat(fpn_feats, dim=2)
             # decode the actions (sigmoid / stride, etc)
-            out_offsets, out_cls_logits = self.diffusion_inference(fpn_feats, masks, fpn_masks, feature_sum)
-            out_offsets, out_cls_logits = change_to_pyramid(out_offsets, out_cls_logits, feature_sum)
-            out_cls_logits = [x.permute(0, 2, 1) for x in out_cls_logits]
-            out_offsets = [x.permute(0, 2, 1) for x in out_offsets]
-            fpn_masks = [x.squeeze(1) for x in fpn_masks]
             results = self.inference(
                 video_list, points, fpn_masks,
-                out_cls_logits, out_offsets,
+                out_cls_logits, out_offsets
             )
             return results
 
@@ -593,34 +540,43 @@ class PtTransformer(nn.Module):
     def losses(
             self, fpn_masks,
             out_cls_logits, out_offsets,
-            gt_cls_labels, gt_offsets,
-            noise_s, noise_l
+            gt_cls_labels, gt_offsets
     ):
+        # fpn_masks, out_*: F (List) [B, T_i, C]
+        # gt_* : B (list) [F T, C]
+        # fpn_masks -> (B, FT)
         valid_mask = torch.cat(fpn_masks, dim=1)
 
+        # 1. classification loss
+        # stack the list -> (B, FT) -> (# Valid, )
         gt_cls = torch.stack(gt_cls_labels)
-        pos_mask = valid_mask
+        pos_mask = torch.logical_and((gt_cls.sum(-1) > 0), valid_mask)
 
-        pred_offsets = torch.cat(out_offsets, dim=1)[pos_mask] - torch.stack(gt_offsets)[pos_mask]
+        # cat the predicted offsets -> (B, FT, 2 (xC)) -> # (#Pos, 2 (xC))
+        pred_offsets = torch.cat(out_offsets, dim=1)[pos_mask]
+        gt_offsets = torch.stack(gt_offsets)[pos_mask]
 
+        # update the loss normalizer
         num_pos = pos_mask.sum().item()
         self.loss_normalizer = self.loss_normalizer_momentum * self.loss_normalizer + (
                 1 - self.loss_normalizer_momentum
         ) * max(num_pos, 1)
 
+        # gt_cls is already one hot encoded now, simply masking out
         gt_target = gt_cls[valid_mask]
+
+        # optinal label smoothing
         gt_target *= 1 - self.train_label_smoothing
         gt_target += self.train_label_smoothing / (self.num_classes + 1)
-        out_cls_logits = torch.cat(out_cls_logits, dim=1)[valid_mask]
-        pre_cla = torch.sigmoid(out_cls_logits) - gt_target
 
         # focal loss
         cls_loss = sigmoid_focal_loss(
-            pre_cla,
-            noise_l,
+            torch.cat(out_cls_logits, dim=1)[valid_mask],
+            gt_target,
             reduction='sum'
         )
         cls_loss /= self.loss_normalizer
+        test_cls = self.test_loss(torch.cat(out_cls_logits, dim=1)[valid_mask], gt_target)
 
         # 2. regression using IoU/GIoU loss (defined on positive samples)
         if num_pos == 0:
@@ -629,7 +585,7 @@ class PtTransformer(nn.Module):
             # giou loss defined on positive samples
             reg_loss = ctr_diou_loss_1d(
                 pred_offsets,
-                noise_s,
+                gt_offsets,
                 reduction='sum'
             )
             reg_loss /= self.loss_normalizer
@@ -802,96 +758,3 @@ class PtTransformer(nn.Module):
             )
 
         return processed_results
-
-    @torch.no_grad()
-    def random_padding(self, gt_segments, gt_labels, dts):
-        """
-        用于填充随机框，填充到200
-        dts：特征向量时间维的长度
-        """
-        padding_segments = []
-        padding_labels = []
-        for gt_segment, gt_label, dt in zip(gt_segments, gt_labels, dts):
-            padding_len = 200 - gt_segment.shape[0]  # 填充到200
-            # 起始点位置
-            st = torch.randint(0, dt, (padding_len, 1))
-            # 动作持续时间，200
-            action_len = torch.randint(0, 200, (padding_len, 1))
-            padding_box = torch.concat((st, st + action_len), dim=1)
-            padding_box.clamp_(max=dt - 1)
-            # 随机label
-            padding_label = torch.randint(0, 20, (padding_len,)).to(gt_label.dtype)
-            padding_box = torch.concat((gt_segment, padding_box.to(self.device)), dim=0)
-            padding_label = torch.concat((gt_label, padding_label.to(self.device)), dim=0)
-            padding_segments.append(padding_box)
-            padding_labels.append(padding_label)
-
-        return padding_segments, padding_labels
-
-    @torch.no_grad()
-    def adding_noise(self, padding_segments, padding_labels):
-        ts = torch.randint(0, 500, (2,)).long().to(self.device)
-        noise_s = torch.randn(padding_segments.shape, device=self.device)
-        noise_l = torch.randn(padding_labels.shape, device=self.device)
-        noisy_segments = self.q_sample(x_start=padding_segments, t=ts, noise=noise_s)
-        noisy_labels = self.q_sample(x_start=padding_labels, t=ts, noise=noise_l)
-
-        return noisy_segments, noisy_labels, ts, noise_s, noise_l
-
-    @torch.no_grad()
-    def q_sample(self, x_start, t, noise=None):
-
-        sqrt_alphas_cumprod_t = extract(self.sqrt_alphas_cumprod, t, x_start.shape).to(self.device)
-        sqrt_one_minus_alphas_cumprod_t = extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape).to(self.device)
-
-        return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
-
-    @torch.no_grad()
-    def diffusion_inference(
-            self,
-            feats, masks, fpn_masks, feature_sum
-    ):
-        """
-        feats: 由视频数据提取的金字塔特征并合并[2, 512, 4526]
-        masks: 对应的masks[2, 1, 4526]
-        fpn_masks: 金字塔形式的masks
-        """
-        # 初始随机噪声
-        noisy_segs = torch.randn(1, 2, feature_sum[-1]).to(self.device).float()
-        noisy_labels = torch.randn(1, 20, feature_sum[-1]).to(self.device).float()
-        # number of sample steps
-        sampling_timesteps = 10
-        times = torch.linspace(-1, 500, steps=sampling_timesteps + 1)
-        times = list(reversed(times.int().tolist()))
-        time_pairs = list(zip(times[:-1], times[1:]))
-        for time_, time_next in time_pairs:
-            time_cond = torch.Tensor([time_]).to(self.device).long()
-            out_offsets, out_cls_logits = self.FPNtrans(
-                noisy_segs.float(), noisy_labels.float(), feats, masks, time_cond
-            )
-            out_offsets, out_cls_logits = change_to_pyramid(out_offsets, out_cls_logits, feature_sum)
-            out_cls_logits = self.cls_head(out_cls_logits, fpn_masks)
-            out_offsets = self.reg_head(out_offsets, fpn_masks)
-            out_cls_logits = torch.cat(out_cls_logits, dim=2)
-            out_offsets = torch.cat(out_offsets, dim=2)
-
-            alpha = self.alphas_cumprod[time_]
-            alpha_next = self.alphas_cumprod[time_next]
-            c = (1 - alpha_next).sqrt()
-
-            x_0_offsets = (noisy_segs - (1 - alpha).sqrt()) / alpha.sqrt()
-            noise1 = torch.randn_like(noisy_segs).to(self.device)
-            noisy_segs = x_0_offsets * alpha_next.sqrt() + \
-                         c * out_offsets
-
-            x_0_cls = (noisy_labels - (1 - alpha).sqrt()) / alpha.sqrt()
-            noisy_labels = x_0_cls * alpha_next.sqrt() + \
-                           c * out_cls_logits
-        return noisy_segs.float(), noisy_labels.float()
-
-    @torch.no_grad()
-    def predict_noise_from_start(self, x_t, t, x0):
-        return (
-                (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) /
-                extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
-        )

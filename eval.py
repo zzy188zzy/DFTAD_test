@@ -77,6 +77,7 @@ def main(args):
     del checkpoint
 
     # set up evaluator
+
     det_eval, output_file = None, None
     if not args.saveonly:
         val_db_vars = val_dataset.get_attributes()

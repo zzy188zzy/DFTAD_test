@@ -12,18 +12,17 @@ class MaskedConv1D(nn.Module):
     Masked 1D convolution. Interface remains the same as Conv1d.
     Only support a sub set of 1d convs
     """
-
     def __init__(
-            self,
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride=1,
-            padding=0,
-            dilation=1,
-            groups=1,
-            bias=True,
-            padding_mode='zeros'
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=1,
+        padding=0,
+        dilation=1,
+        groups=1,
+        bias=True,
+        padding_mode='zeros'
     ):
         super().__init__()
         # element must be aligned
@@ -65,14 +64,13 @@ class LayerNorm(nn.Module):
     """
     LayerNorm that supports inputs of size B, C, T
     """
-
     def __init__(
-            self,
-            num_channels,
-            eps=1e-5,
-            affine=True,
-            device=None,
-            dtype=None,
+        self,
+        num_channels,
+        eps = 1e-5,
+        affine = True,
+        device = None,
+        dtype = None,
     ):
         super().__init__()
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -96,7 +94,7 @@ class LayerNorm(nn.Module):
         # normalization along C channels
         mu = torch.mean(x, dim=1, keepdim=True)
         res_x = x - mu
-        sigma = torch.mean(res_x ** 2, dim=1, keepdim=True)
+        sigma = torch.mean(res_x**2, dim=1, keepdim=True)
         out = res_x / torch.sqrt(sigma + self.eps)
 
         # apply weight and bias
@@ -131,11 +129,11 @@ class MaskedMHA(nn.Module):
     """
 
     def __init__(
-            self,
-            n_embd,  # dimension of the input embedding
-            n_head,  # number of heads in multi-head self-attention
-            attn_pdrop=0.0,  # dropout rate for the attention map
-            proj_pdrop=0.0  # dropout rate for projection op
+        self,
+        n_embd,          # dimension of the input embedding
+        n_head,          # number of heads in multi-head self-attention
+        attn_pdrop=0.0,  # dropout rate for the attention map
+        proj_pdrop=0.0   # dropout rate for projection op
     ):
         super().__init__()
         assert n_embd % n_head == 0
@@ -209,13 +207,13 @@ class MaskedMHCA(nn.Module):
     """
 
     def __init__(
-            self,
-            n_embd,  # dimension of the output features
-            n_head,  # number of heads in multi-head self-attention
-            n_qx_stride=1,  # dowsampling stride for query and input
-            n_kv_stride=1,  # downsampling stride for key and value
-            attn_pdrop=0.0,  # dropout rate for the attention map
-            proj_pdrop=0.0,  # dropout rate for projection op
+        self,
+        n_embd,          # dimension of the output features
+        n_head,          # number of heads in multi-head self-attention
+        n_qx_stride=1,   # dowsampling stride for query and input
+        n_kv_stride=1,   # downsampling stride for key and value
+        attn_pdrop=0.0,  # dropout rate for the attention map
+        proj_pdrop=0.0,  # dropout rate for projection op
     ):
         super().__init__()
         assert n_embd % n_head == 0
@@ -327,15 +325,15 @@ class LocalMaskedMHCA(nn.Module):
     """
 
     def __init__(
-            self,
-            n_embd,  # dimension of the output features
-            n_head,  # number of heads in multi-head self-attention
-            window_size,  # size of the local attention window
-            n_qx_stride=1,  # dowsampling stride for query and input
-            n_kv_stride=1,  # downsampling stride for key and value
-            attn_pdrop=0.0,  # dropout rate for the attention map
-            proj_pdrop=0.0,  # dropout rate for projection op
-            use_rel_pe=False  # use relative position encoding
+        self,
+        n_embd,          # dimension of the output features
+        n_head,          # number of heads in multi-head self-attention
+        window_size,     # size of the local attention window
+        n_qx_stride=1,   # dowsampling stride for query and input
+        n_kv_stride=1,   # downsampling stride for key and value
+        attn_pdrop=0.0,  # dropout rate for the attention map
+        proj_pdrop=0.0,  # dropout rate for projection op
+        use_rel_pe=False # use relative position encoding
     ):
         super().__init__()
         assert n_embd % n_head == 0
@@ -344,7 +342,7 @@ class LocalMaskedMHCA(nn.Module):
         self.n_channels = n_embd // n_head
         self.scale = 1.0 / math.sqrt(self.n_channels)
         self.window_size = window_size
-        self.window_overlap = window_size // 2
+        self.window_overlap  = window_size // 2
         # must use an odd window size
         assert self.window_size > 1 and self.n_head >= 1
         self.use_rel_pe = use_rel_pe
@@ -395,7 +393,7 @@ class LocalMaskedMHCA(nn.Module):
         if self.use_rel_pe:
             self.rel_pe = nn.Parameter(
                 torch.zeros(1, 1, self.n_head, self.window_size))
-            trunc_normal_(self.rel_pe, std=(2.0 / self.n_embd) ** 0.5)
+            trunc_normal_(self.rel_pe, std=(2.0 / self.n_embd)**0.5)
 
     @staticmethod
     def _chunk(x, window_overlap):
@@ -435,7 +433,7 @@ class LocalMaskedMHCA(nn.Module):
         beginning_mask = beginning_mask.expand(beginning_input.size())
         # `== 1` converts to bool or uint8
         beginning_input.masked_fill_(beginning_mask == 1, -float("inf"))
-        ending_input = input_tensor[:, -affected_seq_len:, :, -(affected_seq_len + 1):]
+        ending_input = input_tensor[:, -affected_seq_len:, :, -(affected_seq_len + 1) :]
         ending_mask = ending_mask.expand(ending_input.size())
         # `== 1` converts to bool or uint8
         ending_input.masked_fill_(ending_mask == 1, -float("inf"))
@@ -472,7 +470,7 @@ class LocalMaskedMHCA(nn.Module):
         return x
 
     def _sliding_chunks_query_key_matmul(
-            self, query, key, num_heads, window_overlap
+        self, query, key, num_heads, window_overlap
     ):
         """
         Matrix multiplication of query and key tensors using with a sliding window attention pattern. This implementation
@@ -514,20 +512,19 @@ class LocalMaskedMHCA(nn.Module):
         # copy parts from diagonal_chunked_attention_scores into the combined matrix of attentions
         # - copying the main diagonal and the upper triangle
         diagonal_attention_scores[:, :-1, :, window_overlap:] = diagonal_chunked_attention_scores[
-                                                                :, :, :window_overlap, : window_overlap + 1
-                                                                ]
+            :, :, :window_overlap, : window_overlap + 1
+        ]
         diagonal_attention_scores[:, -1, :, window_overlap:] = diagonal_chunked_attention_scores[
-                                                               :, -1, window_overlap:, : window_overlap + 1
-                                                               ]
+            :, -1, window_overlap:, : window_overlap + 1
+        ]
         # - copying the lower triangle
         diagonal_attention_scores[:, 1:, :, :window_overlap] = diagonal_chunked_attention_scores[
-                                                               :, :, -(window_overlap + 1): -1, window_overlap + 1:
-                                                               ]
+            :, :, -(window_overlap + 1) : -1, window_overlap + 1 :
+        ]
 
         diagonal_attention_scores[:, 0, 1:window_overlap, 1:window_overlap] = diagonal_chunked_attention_scores[
-                                                                              :, 0, : window_overlap - 1,
-                                                                              1 - window_overlap:
-                                                                              ]
+            :, 0, : window_overlap - 1, 1 - window_overlap :
+        ]
 
         # separate batch_size and num_heads dimensions again
         diagonal_attention_scores = diagonal_attention_scores.view(
@@ -538,7 +535,7 @@ class LocalMaskedMHCA(nn.Module):
         return diagonal_attention_scores
 
     def _sliding_chunks_matmul_attn_probs_value(
-            self, attn_probs, value, num_heads, window_overlap
+        self, attn_probs, value, num_heads, window_overlap
     ):
         """
         Same as _sliding_chunks_query_key_matmul but for attn_probs and value tensors. Returned tensor will be of the
@@ -650,20 +647,19 @@ class TransformerBlock(nn.Module):
     A simple (post layer norm) Transformer block
     Modified from https://github.com/karpathy/minGPT/blob/master/mingpt/model.py
     """
-
     def __init__(
-            self,
-            n_embd,  # dimension of the input features
-            n_head,  # number of attention heads
-            n_ds_strides=(1, 1),  # downsampling strides for q & x, k & v
-            n_out=None,  # output dimension, if None, set to input dim
-            n_hidden=None,  # dimension of the hidden layer in MLP
-            act_layer=nn.GELU,  # nonlinear activation used in MLP, default GELU
-            attn_pdrop=0.0,  # dropout rate for the attention map
-            proj_pdrop=0.0,  # dropout rate for the projection / MLP
-            path_pdrop=0.0,  # drop path rate
-            mha_win_size=-1,  # > 0 to use window mha
-            use_rel_pe=False  # if to add rel position encoding to attention
+        self,
+        n_embd,                # dimension of the input features
+        n_head,                # number of attention heads
+        n_ds_strides=(1, 1),   # downsampling strides for q & x, k & v
+        n_out=None,            # output dimension, if None, set to input dim
+        n_hidden=None,         # dimension of the hidden layer in MLP
+        act_layer=nn.GELU,     # nonlinear activation used in MLP, default GELU
+        attn_pdrop=0.0,        # dropout rate for the attention map
+        proj_pdrop=0.0,        # dropout rate for the projection / MLP
+        path_pdrop=0.0,        # drop path rate
+        mha_win_size=-1,       # > 0 to use window mha
+        use_rel_pe=False       # if to add rel position encoding to attention
     ):
         super().__init__()
         assert len(n_ds_strides) == 2
@@ -696,7 +692,7 @@ class TransformerBlock(nn.Module):
         # input
         if n_ds_strides[0] > 1:
             kernel_size, stride, padding = \
-                n_ds_strides[0] + 1, n_ds_strides[0], (n_ds_strides[0] + 1) // 2
+                n_ds_strides[0] + 1, n_ds_strides[0], (n_ds_strides[0] + 1)//2
             self.pool_skip = nn.MaxPool1d(
                 kernel_size, stride=stride, padding=padding)
         else:
@@ -718,8 +714,8 @@ class TransformerBlock(nn.Module):
 
         # drop path
         if path_pdrop > 0.0:
-            self.drop_path_attn = AffineDropPath(n_embd, drop_prob=path_pdrop)
-            self.drop_path_mlp = AffineDropPath(n_out, drop_prob=path_pdrop)
+            self.drop_path_attn = AffineDropPath(n_embd, drop_prob = path_pdrop)
+            self.drop_path_mlp = AffineDropPath(n_out, drop_prob = path_pdrop)
         else:
             self.drop_path_attn = nn.Identity()
             self.drop_path_mlp = nn.Identity()
@@ -741,15 +737,14 @@ class ConvBlock(nn.Module):
     """
     A simple conv block similar to the basic block used in ResNet
     """
-
     def __init__(
-            self,
-            n_embd,  # dimension of the input features
-            kernel_size=3,  # conv kernel size
-            n_ds_stride=1,  # downsampling stride for the current layer
-            expansion_factor=2,  # expansion factor of feat dims
-            n_out=None,  # output dimension, if None, set to input dim
-            act_layer=nn.ReLU,  # nonlinear activation used after conv, default ReLU
+        self,
+        n_embd,                # dimension of the input features
+        kernel_size=3,         # conv kernel size
+        n_ds_stride=1,         # downsampling stride for the current layer
+        expansion_factor=2,    # expansion factor of feat dims
+        n_out=None,            # output dimension, if None, set to input dim
+        act_layer=nn.ReLU,     # nonlinear activation used after conv, default ReLU
     ):
         super().__init__()
         # must use odd sized kernel
@@ -758,7 +753,7 @@ class ConvBlock(nn.Module):
         if n_out is None:
             n_out = n_embd
 
-        # 1x3 (strided) -> 1x3 (basic block in resnet)
+         # 1x3 (strided) -> 1x3 (basic block in resnet)
         width = n_embd * expansion_factor
         self.conv1 = MaskedConv1D(
             n_embd, width, kernel_size, n_ds_stride, padding=padding)
@@ -796,7 +791,6 @@ class Scale(nn.Module):
     """
     Multiply the output regression range by a learnable constant value
     """
-
     def __init__(self, init_value=1.0):
         """
         init_value : initial value for the scalar
@@ -824,7 +818,7 @@ def drop_path(x, drop_prob=0.0, training=False):
         return x
     keep_prob = 1 - drop_prob
     shape = (x.shape[0],) + (1,) * (
-            x.ndim - 1
+        x.ndim - 1
     )  # work with diff dim tensors, not just 2D ConvNets
     mask = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
     mask.floor_()  # binarize

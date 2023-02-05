@@ -20,7 +20,7 @@ from libs.utils import (train_one_epoch, valid_one_epoch, ANETdetection,
                         save_checkpoint, make_optimizer, make_scheduler,
                         fix_random_seed, ModelEma)
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+
 ################################################################################
 def main(args):
     """main function that handles training / inference"""
