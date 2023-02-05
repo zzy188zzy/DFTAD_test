@@ -22,6 +22,7 @@ from libs.utils import (train_one_epoch, valid_one_epoch, ANETdetection,
 
 
 ################################################################################
+os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 def main(args):
     """main function that handles training / inference"""
 
