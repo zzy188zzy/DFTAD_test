@@ -162,6 +162,73 @@ class PtTransformerRegHead(nn.Module):
         return out_offsets
 
 
+class PtTransformerProbHead(nn.Module):
+
+    def __init__(
+            self,
+            input_dim,
+            feat_dim,
+            fpn_levels,
+            num_layers=3,
+            kernel_size=3,
+            act_layer=nn.ReLU,
+            with_ln=False
+    ):
+        super().__init__()
+        self.fpn_levels = fpn_levels
+        self.act = act_layer()
+
+        # build the conv head
+        self.head = nn.ModuleList()
+        self.norm = nn.ModuleList()
+        for idx in range(num_layers - 1):
+            if idx == 0:
+                in_dim = input_dim
+                out_dim = feat_dim
+            else:
+                in_dim = feat_dim
+                out_dim = feat_dim
+            self.head.append(
+                MaskedConv1D(
+                    in_dim, out_dim, kernel_size,
+                    stride=1,
+                    padding=kernel_size // 2,
+                    bias=(not with_ln)
+                )
+            )
+            if with_ln:
+                self.norm.append(LayerNorm(out_dim))
+            else:
+                self.norm.append(nn.Identity())
+
+        self.scale = nn.ModuleList()
+        for idx in range(fpn_levels):
+            self.scale.append(Scale())
+
+        # segment regression
+        self.prob_head = MaskedConv1D(
+            feat_dim, 1, kernel_size,
+            stride=1, padding=kernel_size // 2
+        )
+
+    def forward(self, fpn_feats, fpn_masks):
+        assert len(fpn_feats) == len(fpn_masks)
+        assert len(fpn_feats) == self.fpn_levels
+
+        # apply the classifier for each pyramid level
+        out_offsets = tuple()
+        for l, (cur_feat, cur_mask) in enumerate(zip(fpn_feats, fpn_masks)):
+            cur_out = cur_feat
+            for idx in range(len(self.head)):
+                cur_out, _ = self.head[idx](cur_out, cur_mask)
+                cur_out = self.act(self.norm[idx](cur_out))
+            cur_offsets, _ = self.prob_head(cur_out, cur_mask)
+            out_offsets += (F.sigmoid(self.scale[l](cur_offsets)),)
+
+        # fpn_masks remains the same
+        return out_offsets
+
+
 @register_meta_arch("LocPointTransformer")
 class PtTransformer(nn.Module):
     """
@@ -322,7 +389,12 @@ class PtTransformer(nn.Module):
             num_layers=head_num_layers,
             with_ln=head_with_ln
         )
-
+        self.prob_head = PtTransformerProbHead(
+            fpn_dim, head_dim, len(self.fpn_strides),
+            kernel_size=head_kernel_size,
+            num_layers=head_num_layers,
+            with_ln=head_with_ln
+        )
         # maintain an EMA of #foreground to stabilize the loss normalizer
         # useful for small mini-batch training
         self.loss_normalizer = train_cfg['init_loss_norm']
@@ -350,37 +422,31 @@ class PtTransformer(nn.Module):
         feature_lens = [x.shape[-1] for x in fpn_feats]
         points = self.point_generator(fpn_feats)
 
-        # out_cls: List[B, #cls + 1, T_i]
         out_cls_logits = self.cls_head(fpn_feats, fpn_masks)
-        # out_offset: List[B, 2, T_i]
         out_offsets = self.reg_head(fpn_feats, fpn_masks)
+        out_prob = self.prob_head(fpn_feats, fpn_masks)
 
-        # permute the outputs
-        # out_cls: F List[B, #cls, T_i] -> F List[B, T_i, #cls]
         out_cls_logits = [x.permute(0, 2, 1) for x in out_cls_logits]
-        # out_offset: F List[B, 2 (xC), T_i] -> F List[B, T_i, 2 (xC)]
         out_offsets = [x.permute(0, 2, 1) for x in out_offsets]
-        # fpn_masks: F list[B, 1, T_i] -> F List[B, T_i]
+        out_prob = [x.permute(0, 2, 1) for x in out_prob]
         fpn_masks = [x.squeeze(1) for x in fpn_masks]
 
-        # return loss during training
         if self.training:
-            # generate segment/lable List[N x 2] / List[N] with length = B
             assert video_list[0]['segments'] is not None, "GT action labels does not exist"
             assert video_list[0]['labels'] is not None, "GT action labels does not exist"
             gt_segments = [x['segments'].to(self.device) for x in video_list]
             gt_labels = [x['labels'].to(self.device) for x in video_list]
 
-            # compute the gt labels for cls & reg
-            # list of prediction targets
             gt_cls_labels, gt_offsets = self.label_points(
                 points, gt_segments, gt_labels)
+            valid_mask = torch.cat(fpn_masks, dim=1)
+            gt_cls = torch.stack(gt_cls_labels)
+            gt_prob = torch.logical_and((gt_cls.sum(-1) > 0), valid_mask).float()
 
-            # compute the loss and return
             losses = self.losses(
-                fpn_masks,
-                out_cls_logits, out_offsets,
-                gt_cls_labels, gt_offsets
+                valid_mask,
+                out_cls_logits, out_offsets, out_prob,
+                gt_cls_labels, gt_offsets, gt_prob
             )
             return losses
 
@@ -388,7 +454,7 @@ class PtTransformer(nn.Module):
             # decode the actions (sigmoid / stride, etc)
             results = self.inference(
                 video_list, points, fpn_masks,
-                out_cls_logits, out_offsets
+                out_cls_logits, out_offsets, out_prob
             )
             return results
 
@@ -538,14 +604,19 @@ class PtTransformer(nn.Module):
         return cls_targets, reg_targets
 
     def losses(
-            self, fpn_masks,
-            out_cls_logits, out_offsets,
-            gt_cls_labels, gt_offsets
+            self, valid_mask,
+            out_cls_logits, out_offsets, out_prob,
+            gt_cls_labels, gt_offsets, gt_prob
     ):
         # fpn_masks, out_*: F (List) [B, T_i, C]
         # gt_* : B (list) [F T, C]
         # fpn_masks -> (B, FT)
-        valid_mask = torch.cat(fpn_masks, dim=1)
+
+        # 0. possibility loss
+        out_prob = torch.cat(out_prob, dim=1)
+        out_prob = out_prob[valid_mask].squeeze(1)
+        prob_loss = F.smooth_l1_loss(out_prob, gt_prob[valid_mask], reduction='mean')
+
 
         # 1. classification loss
         # stack the list -> (B, FT) -> (# Valid, )
@@ -596,9 +667,10 @@ class PtTransformer(nn.Module):
             loss_weight = cls_loss.detach() / max(reg_loss.item(), 0.01)
 
         # return a dict of losses
-        final_loss = cls_loss + reg_loss * loss_weight
+        final_loss = cls_loss + reg_loss * loss_weight + prob_loss
         return {'cls_loss': cls_loss,
                 'reg_loss': reg_loss,
+                'prob_loss': prob_loss,
                 'final_loss': final_loss}
 
     @torch.no_grad()
@@ -606,7 +678,7 @@ class PtTransformer(nn.Module):
             self,
             video_list,
             points, fpn_masks,
-            out_cls_logits, out_offsets
+            out_cls_logits, out_offsets, out_prob,
     ):
         # video_list B (list) [dict]
         # points F (list) [T_i, 4]
@@ -628,11 +700,12 @@ class PtTransformer(nn.Module):
             # gather per-video outputs
             cls_logits_per_vid = [x[idx] for x in out_cls_logits]
             offsets_per_vid = [x[idx] for x in out_offsets]
+            out_per_vid = [x[idx] for x in out_prob]
             fpn_masks_per_vid = [x[idx] for x in fpn_masks]
             # inference on a single video (should always be the case)
             results_per_vid = self.inference_single_video(
                 points, fpn_masks_per_vid,
-                cls_logits_per_vid, offsets_per_vid
+                cls_logits_per_vid, offsets_per_vid, out_per_vid
             )
             # pass through video meta info
             results_per_vid['video_id'] = vidx
@@ -654,6 +727,7 @@ class PtTransformer(nn.Module):
             fpn_masks,
             out_cls_logits,
             out_offsets,
+            out_prob
     ):
         # points F (list) [T_i, 4]
         # fpn_masks, out_*: F (List) [T_i, C]
@@ -662,29 +736,23 @@ class PtTransformer(nn.Module):
         cls_idxs_all = []
 
         # loop over fpn levels
-        for cls_i, offsets_i, pts_i, mask_i in zip(
-                out_cls_logits, out_offsets, points, fpn_masks
+        for cls_i, offsets_i, prob_i, pts_i, mask_i in zip(
+                out_cls_logits, out_offsets, out_prob,points, fpn_masks
         ):
-            # sigmoid normalization for output logits
-            pred_prob = (cls_i.sigmoid() * mask_i.unsqueeze(-1)).flatten()
+            pred_prob = (prob_i * mask_i.unsqueeze(-1)).flatten()
 
-            # Apply filtering to make NMS faster following detectron2
-            # 1. Keep seg with confidence score > a threshold
             keep_idxs1 = (pred_prob > self.test_pre_nms_thresh)
             pred_prob = pred_prob[keep_idxs1]
             topk_idxs = keep_idxs1.nonzero(as_tuple=True)[0]
 
-            # 2. Keep top k top scoring boxes only
-            num_topk = min(self.test_pre_nms_topk, topk_idxs.size(0))
+            num_topk = 20
             pred_prob, idxs = pred_prob.sort(descending=True)
             pred_prob = pred_prob[:num_topk].clone()
             topk_idxs = topk_idxs[idxs[:num_topk]].clone()
 
             # fix a warning in pytorch 1.9
-            pt_idxs = torch.div(
-                topk_idxs, self.num_classes, rounding_mode='floor'
-            )
-            cls_idxs = torch.fmod(topk_idxs, self.num_classes)
+            pt_idxs = topk_idxs
+            cls_idxs = torch.argmax(cls_i[pt_idxs], dim=1)
 
             # 3. gather predicted offsets
             offsets = offsets_i[pt_idxs]
@@ -730,18 +798,18 @@ class PtTransformer(nn.Module):
             segs = results_per_vid['segments'].detach().cpu()
             scores = results_per_vid['scores'].detach().cpu()
             labels = results_per_vid['labels'].detach().cpu()
-            if self.test_nms_method != 'none':
-                # 2: batched nms (only implemented on CPU)
-                segs, scores, labels = batched_nms(
-                    segs, scores, labels,
-                    self.test_iou_threshold,
-                    self.test_min_score,
-                    self.test_max_seg_num,
-                    use_soft_nms=(self.test_nms_method == 'soft'),
-                    multiclass=self.test_multiclass_nms,
-                    sigma=self.test_nms_sigma,
-                    voting_thresh=self.test_voting_thresh
-                )
+            # if self.test_nms_method != 'none':
+            #     # 2: batched nms (only implemented on CPU)
+            #     segs, scores, labels = batched_nms(
+            #         segs, scores, labels,
+            #         self.test_iou_threshold,
+            #         self.test_min_score,
+            #         self.test_max_seg_num,
+            #         use_soft_nms=(self.test_nms_method == 'soft'),
+            #         multiclass=self.test_multiclass_nms,
+            #         sigma=self.test_nms_sigma,
+            #         voting_thresh=self.test_voting_thresh
+            #     )
             # 3: convert from feature grids to seconds
             if segs.shape[0] > 0:
                 segs = (segs * stride + 0.5 * nframes) / fps
