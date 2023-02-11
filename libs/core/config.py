@@ -3,7 +3,7 @@ import yaml
 
 DEFAULTS = {
     # random seed for reproducibility, a large number is preferred
-    "init_rand_seed": 1234567891,
+    "init_rand_seed": 1234567891,  # 1234567891
     # dataset loader, specify the dataset here
     "dataset_name": "epic",
     "devices": ['cuda:0'], # default: single gpu
@@ -41,32 +41,40 @@ DEFAULTS = {
     # network architecture
     "model": {
         # type of backbone (convTransformer | conv)
-        "backbone_type": 'convTransformer',
+        "backbone_type": 'conv',
         # type of FPN (fpn | identity)
         "fpn_type": "identity",
-        "backbone_arch": (2, 2, 5),
+        "backbone_arch": (2, 2, 5),  # (2, 2, 5)
         # scale factor between pyramid levels
         "scale_factor": 2,
         # regression range for pyramid levels
-        "regression_range": [(0, 4), (4, 8), (8, 16), (16, 32), (32, 64), (64, 10000)],
+        # "regression_range": [(0, 16), (16, 32), (32, 64), (64, 128), (128, 256), (256, 512)],
+        # "regression_range": [(0, 8), (8, 16), (16, 32), (32, 64), (64, 128), (128, 256)],
+        # "regression_range": [(0, 4), (4, 8), (8, 16), (16, 32), (32, 64), (64, 128)],
+        # "regression_range": [(0, 2), (2, 4), (4, 8), (8, 16), (16, 32), (32, 64)],
+        # "regression_range": [(0, 1), (1, 2), (2, 4), (4, 8), (8, 16), (16, 32), (32, 64), (64, 128)],
+        "regression_range": [(0, 1), (1, 2), (2, 4), (4, 8), (8, 16), (16, 32)],
+        # "regression_range": [(0, 1), (1, 2), (2, 4), (4, 8)],
+        # "regression_range": [(0, 0.5), (0.5, 1), (1, 2), (2, 4), (4, 8), (8, 16)],
+        # "regression_range": [(0, 0.25), (0.25, 0.5), (0.5, 1), (1, 2), (2, 4), (4, 8)],
         # number of heads in self-attention
-        "n_head": 4,
+        "n_head": 4,  # 4
         # window size for self attention; <=1 to use full seq (ie global attention)
         "n_mha_win_size": -1,
         # kernel size for embedding network
         "embd_kernel_size": 3,
         # (output) feature dim for embedding network
-        "embd_dim": 512,
+        "embd_dim": 512,  # 512
         # if attach group norm to embedding network
         "embd_with_ln": True,
         # feat dim for FPN
-        "fpn_dim": 512,
+        "fpn_dim": 512,  # 512
         # if add ln at the end of fpn outputs
         "fpn_with_ln": True,
         # starting level for fpn
         "fpn_start_level": 0,
         # feat dim for head
-        "head_dim": 512,
+        "head_dim": 512,  # 512
         # kernel size for reg/cls/center heads
         "head_kernel_size": 3,
         # number of layers in the head (including the final one)
@@ -100,7 +108,7 @@ DEFAULTS = {
     },
     "test_cfg": {
         "pre_nms_thresh": 0.001,
-        "pre_nms_topk": 5000,
+        "pre_nms_topk": 5000,  # 5000
         "iou_threshold": 0.1,
         "min_score": 0.01,
         "max_seg_num": 1000,
@@ -122,8 +130,8 @@ DEFAULTS = {
         # excluding the warmup epochs
         "epochs": 30,
         # lr scheduler: cosine / multistep
-        "warmup": True,
-        "warmup_epochs": 5,
+        "warmup": True,  # True
+        "warmup_epochs": 5,  # 5
         "schedule_type": "cosine",
         # in #epochs excluding warmup
         "schedule_steps": [],

@@ -33,7 +33,6 @@ def truncate_feats(
 ):
     """
     Truncate feats and time stamps in a dict item
-
     data_dict = {'video_id'        : str
                  'feats'           : Tensor C x T
                  'segments'        : Tensor N x 2 (in feature grid)
@@ -41,7 +40,6 @@ def truncate_feats(
                  'fps'             : float
                  'feat_stride'     : int
                  'feat_num_frames' : in
-
     """
     # get the meta info
     feat_len = data_dict['feats'].shape[1]

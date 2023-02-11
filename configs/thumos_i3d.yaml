@@ -21,12 +21,12 @@ model: {
   n_mha_win_size: 19,
 }
 opt: {
-  learning_rate: 0.0001,
+  learning_rate: 0.0002,  # 0.0002
   epochs: 30,
-  weight_decay: 0.05,
+  weight_decay: 0.05,  # 0.05
 }
 loader: {
-  batch_size: 2,
+  batch_size: 8,
 }
 train_cfg: {
   init_loss_norm: 100,
@@ -37,8 +37,8 @@ train_cfg: {
 }
 test_cfg: {
   voting_thresh: 0.7,
-  pre_nms_topk: 2000,
-  max_seg_num: 200,
+  pre_nms_topk: 2000,  # 2000
+  max_seg_num: 200,  # 200
   min_score: 0.001,
   # when using external scores, our model is generating "proposals"
   # multiclass_nms: False,
@@ -46,4 +46,4 @@ test_cfg: {
   # comment out L47-48 and uncomment L50 to disable score fusion
   multiclass_nms: True,
 }
-output_folder: ./ckpt/
+output_folder: ../ckpt/

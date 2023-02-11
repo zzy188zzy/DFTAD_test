@@ -124,7 +124,6 @@ def get_sinusoid_encoding(n_position, d_hid):
 class MaskedMHA(nn.Module):
     """
     Multi Head Attention with mask
-
     Modified from https://github.com/karpathy/minGPT/blob/master/mingpt/model.py
     """
 
@@ -192,17 +191,14 @@ class MaskedMHA(nn.Module):
 class MaskedMHCA(nn.Module):
     """
     Multi Head Conv Attention with mask
-
     Add a depthwise convolution within a standard MHA
     The extra conv op can be used to
     (1) encode relative position information (relacing position encoding);
     (2) downsample the features if needed;
     (3) match the feature channels
-
     Note: With current implementation, the downsampled feature will be aligned
     to every s+1 time step, where s is the downsampling stride. This allows us
     to easily interpolate the corresponding positional embeddings.
-
     Modified from https://github.com/karpathy/minGPT/blob/master/mingpt/model.py
     """
 
@@ -309,17 +305,14 @@ class MaskedMHCA(nn.Module):
 class LocalMaskedMHCA(nn.Module):
     """
     Local Multi Head Conv Attention with mask
-
     Add a depthwise convolution within a standard MHA
     The extra conv op can be used to
     (1) encode relative position information (relacing position encoding);
     (2) downsample the features if needed;
     (3) match the feature channels
-
     Note: With current implementation, the downsampled feature will be aligned
     to every s+1 time step, where s is the downsampling stride. This allows us
     to easily interpolate the corresponding positional embeddings.
-
     The implementation is fairly tricky, code reference from
     https://github.com/huggingface/transformers/blob/master/src/transformers/models/longformer/modeling_longformer.py
     """
@@ -473,12 +466,12 @@ class LocalMaskedMHCA(nn.Module):
         self, query, key, num_heads, window_overlap
     ):
         """
-        Matrix multiplication of query and key tensors using with a sliding window attention pattern. This implementation
-        splits the input into overlapping chunks of size 2w with an overlap of size w (window_overlap)
+        Matrix multiplication of query and key tensors using with a sliding window attention pattern. This implementation splits the input into overlapping chunks of size 2w with an overlap of size w (window_overlap)
         """
         # query / key: B*nh, T, hs
         bnh, seq_len, head_dim = query.size()
         batch_size = bnh // num_heads
+
         assert seq_len % (window_overlap * 2) == 0
         assert query.size() == key.size()
 

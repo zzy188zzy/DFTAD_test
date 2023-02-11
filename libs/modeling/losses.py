@@ -1,14 +1,13 @@
 import torch
 from torch.nn import functional as F
 
-
 @torch.jit.script
 def sigmoid_focal_loss(
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-        alpha: float = 0.25,
-        gamma: float = 2.0,
-        reduction: str = "none",
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+    reduction: str = "none",
 ) -> torch.Tensor:
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
@@ -51,13 +50,12 @@ def sigmoid_focal_loss(
 
     return loss
 
-
 @torch.jit.script
 def ctr_giou_loss_1d(
-        input_offsets: torch.Tensor,
-        target_offsets: torch.Tensor,
-        reduction: str = 'none',
-        eps: float = 1e-8,
+    input_offsets: torch.Tensor,
+    target_offsets: torch.Tensor,
+    reduction: str = 'none',
+    eps: float = 1e-8,
 ) -> torch.Tensor:
     """
     Generalized Intersection over Union Loss (Hamid Rezatofighi et. al)
@@ -106,13 +104,12 @@ def ctr_giou_loss_1d(
 
     return loss
 
-
 @torch.jit.script
 def ctr_diou_loss_1d(
-        input_offsets: torch.Tensor,
-        target_offsets: torch.Tensor,
-        reduction: str = 'none',
-        eps: float = 1e-8,
+    input_offsets: torch.Tensor,
+    target_offsets: torch.Tensor,
+    reduction: str = 'none',
+    eps: float = 1e-8,
 ) -> torch.Tensor:
     """
     Distance-IoU Loss (Zheng et. al)
@@ -168,3 +165,59 @@ def ctr_diou_loss_1d(
         loss = loss.sum()
 
     return loss
+
+@torch.jit.script
+def score_loss(
+    out_cls_logits: list,
+    fpn_masks: list,
+) -> torch.Tensor:
+    """
+    
+    """
+    scores = []
+    masks = []
+    t = 1
+    # for i, (cls_i, mask) in enumerate(zip(out_cls_logits, fpn_masks)):
+    #     mask = mask==False
+    #     # print(cls_i)
+    #     cls_i = torch.softmax(cls_i, dim=2)
+    #     # print(cls_i)
+    #     cls_i = torch.max(cls_i, dim=2).values
+    #     # print(cls_i)
+    #     cls_i[mask] = 1
+    #     # print(cls_i)
+    #     cls_i = cls_i.unsqueeze(2).expand(cls_i.shape[0], cls_i.shape[1], t).resize(cls_i.shape[0], 2304)
+    #     mask = mask.unsqueeze(2).expand(mask.shape[0], mask.shape[1], t).resize(mask.shape[0], 2304)
+    #     # print(cls_i.shape)
+    #     # print(mask.shape)
+    #     scores.append(cls_i)
+    #     masks.append(mask)
+    #     t *= 2
+        # print('---------------------------------------------------------------')
+    
+    scores = torch.stack(scores,dim=1)  # [2, 6, 2304]
+    # print(scores)
+    masks = torch.stack(masks,dim=1)
+
+    idx = torch.sum(masks, dim=1)
+    idx = idx < 6
+    scores = torch.min(scores, dim=1).values
+
+    # print(scores[0, :, 0])
+    # scores = torch.sort(scores, dim=1).values
+    # print(scores[0, :, 0])
+    # exit()
+
+    scores = scores[idx]
+
+    scores -= torch.ones(scores.shape, device=scores.device)*0.05  # 0.05
+
+    # level = 3
+    # scores = scores[:, :level, :]
+
+    # sco_loss = scores.sum() / (level*2304*scores.shape[0])
+    
+    sco_loss = scores.sum()
+    sco_loss /= idx.sum()
+    # sco_loss /= self.loss_normalizer
+    return sco_loss

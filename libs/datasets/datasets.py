@@ -3,14 +3,11 @@ import torch
 from .data_utils import trivial_batch_collator, worker_init_reset_seed
 
 datasets = {}
-
-
 def register_dataset(name):
    def decorator(cls):
        datasets[name] = cls
        return cls
    return decorator
-
 
 def make_dataset(name, is_training, split, **kwargs):
    """
@@ -18,7 +15,6 @@ def make_dataset(name, is_training, split, **kwargs):
    """
    dataset = datasets[name](is_training, split, **kwargs)
    return dataset
-
 
 def make_data_loader(dataset, is_training, generator, batch_size, num_workers):
     """

@@ -5,7 +5,7 @@ from torch.nn import functional as F
 from .models import register_backbone
 from .blocks import (get_sinusoid_encoding, TransformerBlock, MaskedConv1D,
                      ConvBlock, LayerNorm)
-from .deformable_trans import DeformableTransformer
+
 
 @register_backbone("convTransformer")
 class ConvTransformerBackbone(nn.Module):
@@ -74,20 +74,20 @@ class ConvTransformerBackbone(nn.Module):
             self.register_buffer("pos_embd", pos_embd, persistent=False)
 
         # stem network using (vanilla) transformer
-        # self.stem = nn.ModuleList()
-        # for idx in range(arch[1]):
-        #     self.stem.append(
-        #         TransformerBlock(
-        #             n_embd, n_head,
-        #             n_ds_strides=(1, 1),
-        #             attn_pdrop=attn_pdrop,
-        #             proj_pdrop=proj_pdrop,
-        #             path_pdrop=path_pdrop,
-        #             mha_win_size=self.mha_win_size[0],
-        #             use_rel_pe=self.use_rel_pe
-        #         )
-        #     )
-        self.stem = DeformableTransformer(feature_dimm=512)
+        self.stem = nn.ModuleList()
+        for idx in range(arch[1]):
+            self.stem.append(
+                TransformerBlock(
+                    n_embd, n_head,
+                    n_ds_strides=(1, 1),
+                    attn_pdrop=attn_pdrop,
+                    proj_pdrop=proj_pdrop,
+                    path_pdrop=path_pdrop,
+                    mha_win_size=self.mha_win_size[0],
+                    use_rel_pe=self.use_rel_pe
+                )
+            )
+
         # main branch using transformer with pooling
         self.branch = nn.ModuleList()
         for idx in range(arch[2]):
@@ -148,9 +148,9 @@ class ConvTransformerBackbone(nn.Module):
             x = x + pe[:, :, :T] * mask.to(x.dtype)
 
         # stem transformer
-        # for idx in range(len(self.stem)):
-        #     x, mask = self.stem[idx](x, mask)
-        x, mask = self.stem(x, mask.squeeze(1))
+        for idx in range(len(self.stem)):
+            x, mask = self.stem[idx](x, mask)
+
         # prep for outputs
         out_feats = (x, )
         out_masks = (mask, )
